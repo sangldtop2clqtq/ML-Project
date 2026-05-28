@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from .data import find_allele_pairs
+from ..data import find_allele_pairs
 
 
 class STRFeatureTransformer(BaseEstimator, TransformerMixin):
@@ -78,4 +78,3 @@ class STRFeatureTransformer(BaseEstimator, TransformerMixin):
             if self.include_heterozygosity:
                 names.append(f"locus_{locus_number:02d}_heterozygous")
         return names
-

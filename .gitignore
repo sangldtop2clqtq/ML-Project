@@ -220,10 +220,22 @@ __marimo__/
 # Project outputs
 models/*
 !models/.gitkeep
+!models/*/
+models/*/*
+!models/*/.gitkeep
 reports/*
 !reports/.gitkeep
+!reports/*/
+reports/*/*
+!reports/*/.gitkeep
+!reports/*/figures/
+reports/*/figures/*
+!reports/*/figures/.gitkeep
 !reports/figures/
 reports/figures/*
 !reports/figures/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
+!data/processed/*/
+data/processed/*/*
+!data/processed/*/.gitkeep

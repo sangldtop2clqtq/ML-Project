@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import ID_COLUMNS, TARGET_COLUMN
+from ..config import ID_COLUMNS, TARGET_COLUMN
 
 
 ALLELE_COLUMN_RE = re.compile(r"^(A[12])(?:\.(\d+))?$")
@@ -62,4 +62,3 @@ def validate_genotype_table(
 
 def metadata_columns(df: pd.DataFrame) -> list[str]:
     return [column for column in ID_COLUMNS if column in df.columns]
-
