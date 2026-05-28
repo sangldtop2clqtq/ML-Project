@@ -6,7 +6,19 @@ from ..data import find_allele_pairs
 
 
 class STRFeatureTransformer(BaseEstimator, TransformerMixin):
-    """Convert STR A1/A2 genotype columns into numeric model features."""
+    """Convert STR A1/A2 genotype columns into numeric model features.
+
+    # --- EXTENSION POINT: FEATURE ENGINEERING FOR SNP ---
+    # STRFeatureTransformer is specifically designed for STR (Short Tandem Repeat) alleles (low, high, sum, diff, heterozygosity).
+    # To extend the pipeline for SNP genotype data, you can:
+    # 1. Create a `SNPFeatureTransformer` class in this file or a new `snp_features.py` file.
+    # 2. SNP data usually requires different preprocessing depending on its format:
+    #    - If SNPs are represented as dosage (0, 1, 2 representing reference allele count):
+    #      Use a simple identity transformer or Standard Scaler directly.
+    #    - If SNPs are represented as string alleles (e.g., A/T, C/G, or AA, AT, TT):
+    #      Implement a One-Hot Encoder or Label Encoder mapping 'AA'->0, 'AT'->1, 'TT'->2.
+    # 3. Reference the newly created SNP feature transformer inside `src/ancestry/models.py` when building the pipeline.
+    """
 
     def __init__(
         self,
@@ -15,6 +27,7 @@ class STRFeatureTransformer(BaseEstimator, TransformerMixin):
         include_diff: bool = True,
         include_heterozygosity: bool = True,
     ) -> None:
+
         self.allele_pairs = allele_pairs
         self.include_sum = include_sum
         self.include_diff = include_diff

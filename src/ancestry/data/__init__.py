@@ -43,7 +43,21 @@ def validate_genotype_table(
     df: pd.DataFrame,
     target_column: str = TARGET_COLUMN,
 ) -> list[tuple[str, str]]:
-    """Validate required columns and return detected allele pairs."""
+    """Validate required columns and return detected allele pairs.
+
+    # --- EXTENSION POINT: DATA VALIDATION FOR SNP & SUBPOP ---
+    # 1. Target Column (POP vs SUBPOP):
+    #    - Currently accepts either target_column="POP" or target_column="SUBPOP" based on input.
+    #    - Make sure the data CSV actually contains the requested target column.
+    # 2. Genotype Type Support (STR vs SNP):
+    #    - Currently, this method searches for A1/A2 STR allele pairs.
+    #    - For SNP genotype data:
+    #      A. If SNP is formatted as A1/A2 alleles (like STR), this method can be reused.
+    #      B. If SNP is formatted differently (e.g., direct SNP names like rs12345 with values 0, 1, 2 or AA, AT, TT):
+    #         - Skip `find_allele_pairs` validation.
+    #         - Validate that the features match SNP names and don't contain invalid genotypes.
+    #         - You can add an `if genotype_type == "snp"` branch here or pass a parameter.
+    """
     required_columns = {"SAMPLE", target_column}
     missing = sorted(required_columns.difference(df.columns))
     if missing:
@@ -58,6 +72,7 @@ def validate_genotype_table(
         raise ValueError(f"Target column {target_column!r} has {missing_target} missing values.")
 
     return allele_pairs
+
 
 
 def metadata_columns(df: pd.DataFrame) -> list[str]:
