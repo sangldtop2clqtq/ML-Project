@@ -1,12 +1,14 @@
+from __future__ import annotations
+
 import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import joblib
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -17,31 +19,33 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
 
 from .config import CV_SPLITS, DEFAULT_DATA_PATH, DEFAULT_OUTPUT_DIR, DEFAULT_REPORT_DIR, RANDOM_STATE, TARGET_COLUMN, TEST_SIZE
-from .data import load_genotype_table, metadata_columns, validate_genotype_table
+from .data import load_genotype_table, metadata_columns, validate_table_for_genotype
 from .models import build_pipeline, candidate_models
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train ancestry prediction models from STR genotype data.")
-    parser.add_argument("--data-path", type=Path, default=DEFAULT_DATA_PATH)
-    parser.add_argument("--target-column", default=TARGET_COLUMN, help="Target label, usually POP or SUBPOP.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--report-dir", type=Path, default=DEFAULT_REPORT_DIR)
-    parser.add_argument("--test-size", type=float, default=TEST_SIZE)
-    parser.add_argument("--cv-splits", type=int, default=CV_SPLITS)
-    parser.add_argument("--random-state", type=int, default=RANDOM_STATE)
+    parser = argparse.ArgumentParser(description="Train ancestry prediction models from genotype data.")
+    parser.add_argument("--config", type=Path, help="JSON config for a task, e.g. configs/snp_pop.json.")
+    parser.add_argument("--data-path", type=Path)
+    parser.add_argument("--target-column", help="Target label, usually POP or SUBPOP.")
+    parser.add_argument("--genotype-type", choices=("str", "snp"))
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--report-dir", type=Path)
+    parser.add_argument("--test-size", type=float)
+    parser.add_argument("--cv-splits", type=int)
+    parser.add_argument("--random-state", type=int)
     parser.add_argument("--model-name", choices=sorted(candidate_models().keys()), help="Train only one model.")
     return parser.parse_args()
 
 
 def main() -> None:
-    args = parse_args()
+    args = resolve_args(parse_args())
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.report_dir.mkdir(parents=True, exist_ok=True)
     (args.report_dir / "figures").mkdir(parents=True, exist_ok=True)
 
-    df = load_genotype_table(args.data_path)
-    allele_pairs = validate_genotype_table(df, target_column=args.target_column)
+    df = load_genotype_table(args.data_path, genotype_type=args.genotype_type)
+    feature_columns = validate_table_for_genotype(df, genotype_type=args.genotype_type, target_column=args.target_column)
 
     y = df[args.target_column].astype(str)
     X = df.drop(columns=[args.target_column])
@@ -58,17 +62,25 @@ def main() -> None:
     if args.model_name:
         models = {args.model_name: models[args.model_name]}
 
-    cv_results = evaluate_candidates(X_train, y_train, models, allele_pairs, args.cv_splits, args.random_state)
+    cv_results = evaluate_candidates(
+        X_train,
+        y_train,
+        models,
+        feature_columns,
+        args.genotype_type,
+        args.cv_splits,
+        args.random_state,
+    )
     cv_results.to_csv(args.report_dir / "cv_results.csv", index=False)
 
     best_model_name = cv_results.iloc[0]["model"]
-    best_pipeline = build_pipeline(models[best_model_name], allele_pairs)
+    best_pipeline = build_pipeline(models[best_model_name], feature_columns, genotype_type=args.genotype_type)
     best_pipeline.fit(X_train, y_train)
 
     labels = sorted(y.unique())
     metrics, predictions = evaluate_holdout(best_pipeline, X_test, y_test, labels, metadata_columns(X_test))
 
-    model_path = args.output_dir / "ancestry_str_model.joblib"
+    model_path = args.output_dir / f"ancestry_{args.genotype_type}_model.joblib"
     joblib.dump(best_pipeline, model_path)
 
     predictions.to_csv(args.report_dir / "holdout_predictions.csv", index=False)
@@ -77,6 +89,7 @@ def main() -> None:
         {
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "data_path": str(args.data_path),
+            "genotype_type": args.genotype_type,
             "target_column": args.target_column,
             "model_path": str(model_path),
             "best_model": best_model_name,
@@ -84,7 +97,7 @@ def main() -> None:
             "n_train": int(len(X_train)),
             "n_test": int(len(X_test)),
             "labels": labels,
-            "allele_pairs": [list(pair) for pair in allele_pairs],
+            "features": [list(item) if isinstance(item, tuple) else item for item in feature_columns],
         },
         args.report_dir / "run_metadata.json",
     )
@@ -96,11 +109,28 @@ def main() -> None:
     print(f"Artifacts saved to: {args.output_dir} and {args.report_dir}")
 
 
+def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
+    config: dict[str, object] = {}
+    if args.config:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+
+    args.genotype_type = args.genotype_type or str(config.get("genotype_type", "str"))
+    args.data_path = args.data_path or Path(str(config.get("data_path", DEFAULT_DATA_PATH)))
+    args.target_column = args.target_column or str(config.get("target_column", TARGET_COLUMN))
+    args.output_dir = args.output_dir or Path(str(config.get("output_dir", DEFAULT_OUTPUT_DIR)))
+    args.report_dir = args.report_dir or Path(str(config.get("report_dir", DEFAULT_REPORT_DIR)))
+    args.test_size = args.test_size if args.test_size is not None else float(config.get("test_size", TEST_SIZE))
+    args.cv_splits = args.cv_splits if args.cv_splits is not None else int(config.get("cv_splits", CV_SPLITS))
+    args.random_state = args.random_state if args.random_state is not None else int(config.get("random_state", RANDOM_STATE))
+    return args
+
+
 def evaluate_candidates(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     models: dict[str, object],
-    allele_pairs: list[tuple[str, str]],
+    feature_columns: list[tuple[str, str]] | list[str],
+    genotype_type: str,
     cv_splits: int,
     random_state: int,
 ) -> pd.DataFrame:
@@ -113,14 +143,14 @@ def evaluate_candidates(
 
     rows: list[dict[str, float | str]] = []
     for model_name, estimator in models.items():
-        pipeline = build_pipeline(estimator, allele_pairs)
+        pipeline = build_pipeline(estimator, feature_columns, genotype_type=genotype_type)
         scores = cross_validate(
             pipeline,
             X_train,
             y_train,
             cv=cv,
             scoring=scorer,
-            n_jobs=-1,
+            n_jobs=1,
             return_train_score=False,
         )
         row: dict[str, float | str] = {"model": model_name}
@@ -165,27 +195,51 @@ def evaluate_holdout(
 
 
 def plot_confusion_matrix(matrix: list[list[int]], labels: list[str], output_path: Path) -> None:
-    fig, ax = plt.subplots(figsize=(7, 6))
-    image = ax.imshow(matrix, interpolation="nearest", cmap="Blues")
-    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    cell_size = 96
+    left_margin = 96
+    top_margin = 104
+    right_margin = 24
+    bottom_margin = 72
+    width = left_margin + len(labels) * cell_size + right_margin
+    height = top_margin + len(labels) * cell_size + bottom_margin
 
-    ax.set_xticks(range(len(labels)))
-    ax.set_yticks(range(len(labels)))
-    ax.set_xticklabels(labels)
-    ax.set_yticklabels(labels)
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
-    ax.set_title("Holdout confusion matrix")
+    image = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    max_value = max((max(row) for row in matrix), default=1) or 1
 
-    threshold = max(max(row) for row in matrix) / 2 if matrix else 0
-    for i, row in enumerate(matrix):
-        for j, value in enumerate(row):
-            color = "white" if value > threshold else "black"
-            ax.text(j, i, str(value), ha="center", va="center", color=color)
+    draw.text((left_margin, 24), "Holdout confusion matrix", fill="black", font=font)
+    draw.text((left_margin, height - 32), "Predicted label", fill="black", font=font)
+    draw.text((16, top_margin - 32), "True", fill="black", font=font)
 
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=180)
-    plt.close(fig)
+    for index, label in enumerate(labels):
+        x = left_margin + index * cell_size
+        y = top_margin + index * cell_size
+        draw.text((x + 28, top_margin - 28), label, fill="black", font=font)
+        draw.text((24, y + 40), label, fill="black", font=font)
+
+    for row_index, row in enumerate(matrix):
+        for column_index, value in enumerate(row):
+            intensity = int(235 - (value / max_value) * 170)
+            fill = (intensity, intensity + 10, 255)
+            x0 = left_margin + column_index * cell_size
+            y0 = top_margin + row_index * cell_size
+            x1 = x0 + cell_size
+            y1 = y0 + cell_size
+            draw.rectangle((x0, y0, x1, y1), fill=fill, outline=(120, 135, 160))
+            text = str(value)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            color = "white" if value > max_value / 2 else "black"
+            draw.text(
+                (x0 + (cell_size - text_width) / 2, y0 + (cell_size - text_height) / 2),
+                text,
+                fill=color,
+                font=font,
+            )
+
+    image.save(output_path)
 
 
 def save_json(payload: dict[str, object], path: Path) -> None:

@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from ..data import find_allele_pairs
+from ..data import find_allele_pairs, snp_feature_columns
 
 
 class STRFeatureTransformer(BaseEstimator, TransformerMixin):
@@ -91,3 +93,34 @@ class STRFeatureTransformer(BaseEstimator, TransformerMixin):
             if self.include_heterozygosity:
                 names.append(f"locus_{locus_number:02d}_heterozygous")
         return names
+
+
+class SNPFeatureTransformer(BaseEstimator, TransformerMixin):
+    """Select numeric SNP marker columns for model input."""
+
+    def __init__(self, feature_columns: list[str] | None = None) -> None:
+        self.feature_columns = feature_columns
+
+    def fit(self, X: pd.DataFrame, y: pd.Series | None = None):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("SNPFeatureTransformer expects a pandas DataFrame.")
+
+        self.feature_columns_ = self.feature_columns or snp_feature_columns(X)
+        if not self.feature_columns_:
+            raise ValueError("No SNP marker columns found in input data.")
+
+        self.feature_names_out_ = list(self.feature_columns_)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("SNPFeatureTransformer expects a pandas DataFrame.")
+
+        missing = [column for column in self.feature_columns_ if column not in X.columns]
+        if missing:
+            raise ValueError(f"Missing SNP feature columns: {missing[:10]}")
+
+        return X[self.feature_columns_].apply(pd.to_numeric, errors="coerce")
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        return np.asarray(self.feature_names_out_, dtype=object)
