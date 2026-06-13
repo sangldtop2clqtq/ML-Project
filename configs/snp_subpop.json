@@ -1,7 +1,7 @@
 {
   "task_name": "snp_subpop",
   "genotype_type": "snp",
-  "data_path": "data/interim/snp/snp_genotypes_cleaned.csv",
+  "data_path": "data/interim/snp/model_train_data.csv",
   "target_column": "SUBPOP",
   "output_dir": "models/snp_subpop",
   "report_dir": "reports/snp_subpop",

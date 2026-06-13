@@ -27,20 +27,18 @@ data/
     str/
       str_genotypes_cleaned.csv
     snp/
-      snp_genotypes_cleaned.csv
+      model_train_data.csv
   processed/
     str/
     snp/
 
 src/ancestry/
-  data/                 # Vi tri danh cho loader/validation theo tung kieu genotype
-  features/             # Vi tri danh cho feature transformer STR/SNP
   config.py             # Default path cho task STR + POP hien tai
-  data.py               # Loader/validation STR hien tai
-  features.py           # STRFeatureTransformer hien tai
+  data/                 # Loader/validation STR va SNP
+  features/             # STRFeatureTransformer va SNPFeatureTransformer
   models.py             # Candidate models
-  train.py              # Training pipeline hien tai
-  predict.py            # Prediction pipeline hien tai
+  train.py              # Training pipeline theo config
+  predict.py            # Prediction pipeline theo config
 
 models/
   str_pop/
@@ -63,41 +61,56 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## Task hien tai dang chay
+## Cach chay pipeline
 
-Code hien tai van dang ho tro truc tiep task:
-
-```text
-STR genotype -> POP
-```
-
-Du lieu mac dinh:
+Code dung mot pipeline chung cho cac task. Khac nhau giua STR/SNP va POP/SUBPOP nam trong file config:
 
 ```text
-data/interim/str/str_genotypes_cleaned.csv
+configs/str_pop.json
+configs/str_subpop.json
+configs/snp_pop.json
+configs/snp_subpop.json
 ```
 
-Output mac dinh:
+Train theo config:
 
-```text
-models/str_pop/ancestry_str_model.joblib
-reports/str_pop/cv_results.csv
-reports/str_pop/metrics.json
-reports/str_pop/holdout_predictions.csv
-reports/str_pop/run_metadata.json
-reports/str_pop/figures/confusion_matrix.png
+```powershell
+python scripts/train.py --config configs/str_pop.json
+python scripts/train.py --config configs/snp_pop.json
 ```
 
-Chay pipeline hien tai:
+Predict theo config:
+
+```powershell
+python scripts/predict.py --config configs/str_pop.json
+python scripts/predict.py --config configs/snp_pop.json
+```
+
+Neu khong truyen `--config`, mac dinh van la task STR -> POP:
 
 ```powershell
 python scripts/run_pipeline.py
 ```
 
-Du doan voi model da train:
+Output duoc tach theo `output_dir` va `report_dir` trong tung config. Vi du SNP -> POP ghi vao:
 
-```powershell
-python scripts/predict.py --data-path data/interim/str/str_genotypes_cleaned.csv
+```text
+models/snp_pop/ancestry_snp_model.joblib
+reports/snp_pop/cv_results.csv
+reports/snp_pop/metrics.json
+reports/snp_pop/holdout_predictions.csv
+reports/snp_pop/predictions.csv
+reports/snp_pop/run_metadata.json
+reports/snp_pop/figures/confusion_matrix.png
+```
+
+Trong file SNP hien tai, loader se chuan hoa ten cot:
+
+```text
+sample_id  -> SAMPLE
+super_pop  -> POP
+pop        -> SUBPOP
+rs...      -> SNP features
 ```
 
 ## Y nghia 4 config
@@ -128,8 +141,5 @@ Dung SNP genotype de du doan nhan quan the con `SUBPOP`.
 
 ## Huong phat trien tiep
 
-- Tach logic hien tai trong `data.py` thanh `src/ancestry/data/str_loader.py`.
-- Tach `STRFeatureTransformer` trong `features.py` thanh `src/ancestry/features/str_features.py`.
-- Them `src/ancestry/data/snp_loader.py` va `src/ancestry/features/snp_features.py`.
-- Them `registry.py` de chon loader/feature transformer theo `genotype_type`.
-- Cap nhat `train.py` va `predict.py` de doc config bang tham so `--config`.
+- Them feature selection cho SNP khi so marker lon hon.
+- Them bao cao so sanh giua STR + POP va SNP + POP.

@@ -27,9 +27,8 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "models" / "str_pop"
 DEFAULT_REPORT_DIR = PROJECT_ROOT / "reports" / "str_pop"
 
 TARGET_COLUMN = "POP"
-ID_COLUMNS = ("SAMPLE", "POP", "SUBPOP")
+ID_COLUMNS = ("SAMPLE", "sample_id", "POP", "pop", "SUBPOP", "super_pop")
 
 RANDOM_STATE = 42
 TEST_SIZE = 0.2
 CV_SPLITS = 5
-

@@ -1,7 +1,7 @@
 {
   "task_name": "snp_pop",
   "genotype_type": "snp",
-  "data_path": "data/interim/snp/snp_genotypes_cleaned.csv",
+  "data_path": "data/interim/snp/model_train_data.csv",
   "target_column": "POP",
   "output_dir": "models/snp_pop",
   "report_dir": "reports/snp_pop",

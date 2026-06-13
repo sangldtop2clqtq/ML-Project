@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 from pathlib import Path
 
@@ -7,11 +9,20 @@ from ..config import ID_COLUMNS, TARGET_COLUMN
 
 
 ALLELE_COLUMN_RE = re.compile(r"^(A[12])(?:\.(\d+))?$")
+SNP_COLUMN_RE = re.compile(r"^rs\d+$", re.IGNORECASE)
+SNP_COLUMN_ALIASES = {
+    "sample_id": "SAMPLE",
+    "pop": "SUBPOP",
+    "super_pop": "POP",
+}
 
 
-def load_genotype_table(path: str | Path) -> pd.DataFrame:
-    """Load the cleaned STR genotype table."""
-    return pd.read_csv(path)
+def load_genotype_table(path: str | Path, genotype_type: str = "str") -> pd.DataFrame:
+    """Load a cleaned genotype table and normalize common column names."""
+    df = pd.read_csv(path)
+    if genotype_type == "snp":
+        df = df.rename(columns={source: target for source, target in SNP_COLUMN_ALIASES.items() if source in df.columns})
+    return df
 
 
 def find_allele_pairs(columns: list[str] | pd.Index) -> list[tuple[str, str]]:
@@ -40,6 +51,13 @@ def find_allele_pairs(columns: list[str] | pd.Index) -> list[tuple[str, str]]:
 
 
 def validate_genotype_table(
+    df: pd.DataFrame,
+    target_column: str = TARGET_COLUMN,
+) -> list[tuple[str, str]]:
+    return validate_str_genotype_table(df, target_column=target_column)
+
+
+def validate_str_genotype_table(
     df: pd.DataFrame,
     target_column: str = TARGET_COLUMN,
 ) -> list[tuple[str, str]]:
@@ -73,6 +91,45 @@ def validate_genotype_table(
 
     return allele_pairs
 
+
+def snp_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in df.columns if SNP_COLUMN_RE.match(str(column))]
+
+
+def validate_snp_genotype_table(
+    df: pd.DataFrame,
+    target_column: str = TARGET_COLUMN,
+) -> list[str]:
+    required_columns = {"SAMPLE", target_column}
+    missing = sorted(required_columns.difference(df.columns))
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    missing_target = int(df[target_column].isna().sum())
+    if missing_target:
+        raise ValueError(f"Target column {target_column!r} has {missing_target} missing values.")
+
+    feature_columns = snp_feature_columns(df)
+    if not feature_columns:
+        raise ValueError("No SNP marker columns matching rs<digits> were found.")
+
+    non_numeric = [column for column in feature_columns if not pd.api.types.is_numeric_dtype(df[column])]
+    if non_numeric:
+        raise ValueError(f"SNP columns must be numeric dosage/features. Non-numeric columns: {non_numeric[:10]}")
+
+    return feature_columns
+
+
+def validate_table_for_genotype(
+    df: pd.DataFrame,
+    genotype_type: str,
+    target_column: str = TARGET_COLUMN,
+) -> list[tuple[str, str]] | list[str]:
+    if genotype_type == "str":
+        return validate_str_genotype_table(df, target_column=target_column)
+    if genotype_type == "snp":
+        return validate_snp_genotype_table(df, target_column=target_column)
+    raise ValueError(f"Unsupported genotype_type: {genotype_type!r}")
 
 
 def metadata_columns(df: pd.DataFrame) -> list[str]:
