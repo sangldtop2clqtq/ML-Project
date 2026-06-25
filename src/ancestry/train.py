@@ -29,6 +29,7 @@ from .config import (
 )
 # Nhập hàm load chuyên dụng cho SNP mà chúng ta đã làm việc ở bước trước
 from .data.snp_loader import load_snp_data
+from .data.str_loader import load_str_data
 from .models import build_pipeline, candidate_models
 
 
@@ -70,14 +71,10 @@ def main() -> None:
         X, y = load_snp_data(str(args.data_path), args.target_column)
         feature_columns = list(X.columns)
     else:
-        # Giữ nguyên luồng xử lý cũ cho dữ liệu STR
-        from .data import load_genotype_table, validate_table_for_genotype
-        df = load_genotype_table(args.data_path, genotype_type=args.genotype_type)
-        feature_columns = validate_table_for_genotype(
-            df, genotype_type=args.genotype_type, target_column=args.target_column
-        )
-        y = df[args.target_column].astype(str)
-        X = df.drop(columns=[args.target_column])
+        # Sử dụng loader chuyên dụng mới cho dữ liệu STR
+        X, y = load_str_data(str(args.data_path), args.target_column)
+        from .data import find_allele_pairs
+        feature_columns = find_allele_pairs(X.columns)
 
     # Tự động kích hoạt Feature Selection nếu là dữ liệu SNP để tránh overfitting
     use_fs = True if args.genotype_type == "snp" else False
