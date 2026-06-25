@@ -101,6 +101,28 @@ def main() -> None:
         args.random_state,
         use_feature_selection=use_fs,  # Truyền flag điều khiển
     )
+
+    # Đánh giá tất cả mô hình trên tập Holdout Test để so sánh trực tiếp
+    holdout_scores = []
+    for model_name, estimator in models.items():
+        pipeline = build_pipeline(
+            estimator,
+            feature_columns,
+            genotype_type=args.genotype_type,
+            use_feature_selection=use_fs,
+        )
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        
+        holdout_scores.append({
+            "model": model_name,
+            "holdout_accuracy": float(accuracy_score(y_test, y_pred)),
+            "holdout_balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
+            "holdout_f1_macro": float(f1_score(y_test, y_pred, average="macro"))
+        })
+    
+    holdout_df = pd.DataFrame(holdout_scores)
+    cv_results = cv_results.merge(holdout_df, on="model")
     cv_results.to_csv(args.report_dir / "cv_results.csv", index=False)
 
     best_model_name = cv_results.iloc[0]["model"]
@@ -237,9 +259,10 @@ def evaluate_candidates(
         )
         row: dict[str, float | str] = {"model": model_name}
         for metric in scorer:
-            values = scores[f"test_{metric}"]
-            row[f"{metric}_mean"] = float(np.mean(values))
-            row[f"{metric}_std"] = float(np.std(values))
+            # Validation scores (test fold)
+            val_values = scores[f"test_{metric}"]
+            row[f"{metric}_mean"] = float(np.mean(val_values))
+            row[f"{metric}_std"] = float(np.std(val_values))
         rows.append(row)
 
     return (
