@@ -79,6 +79,35 @@ python scripts/train.py --config configs/str_pop.json
 python scripts/train.py --config configs/snp_pop.json
 ```
 
+Chay ban co random search de so sanh:
+
+```powershell
+python scripts/trainz.py --config configs/str_pop.json
+python scripts/trainz.py --config configs/snp_pop.json
+```
+
+Random search duoc bat mac dinh khi train. Quy trinh moi la:
+
+```text
+1. Tach train/test
+2. Lay mot phan train de random search tim hyperparameter
+3. Chon model + bo tham so tot nhat theo balanced_accuracy
+4. Train lai tren toan bo train set
+5. Danh gia tren holdout test set
+```
+
+Co the dieu chinh bang config hoac CLI:
+
+```json
+{
+  "use_random_search": true,
+  "random_search_iters": 12,
+  "tuning_sample_fraction": 0.6,
+  "tuning_max_samples": 0,
+  "tuning_cv_splits": 3
+}
+```
+
 Predict theo config:
 
 ```powershell

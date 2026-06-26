@@ -25,9 +25,9 @@ class STRFeatureTransformer(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         allele_pairs: list[tuple[str, str]] | None = None,
-        include_sum: bool = True,
-        include_diff: bool = True,
-        include_heterozygosity: bool = True,
+        include_sum: bool = False,
+        include_diff: bool = False,
+        include_heterozygosity: bool = False,
     ) -> None:
 
         self.allele_pairs = allele_pairs

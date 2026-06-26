@@ -9,6 +9,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
+from sklearn.base import clone
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -16,7 +17,12 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_split
+from sklearn.model_selection import (
+    RandomizedSearchCV,
+    StratifiedKFold,
+    cross_validate,
+    train_test_split,
+)
 
 from .config import (
     CV_SPLITS,
@@ -27,10 +33,9 @@ from .config import (
     TARGET_COLUMN,
     TEST_SIZE,
 )
-# Nhập hàm load chuyên dụng cho SNP mà chúng ta đã làm việc ở bước trước
 from .data.snp_loader import load_snp_data
 from .data.str_loader import load_str_data
-from .models import build_pipeline, candidate_models
+from .models import build_pipeline, candidate_models, random_search_spaces
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,27 +62,34 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(candidate_models().keys()),
         help="Train only one model.",
     )
+    parser.add_argument("--random-search-iters", type=int)
+    parser.add_argument("--tuning-sample-fraction", type=float)
+    parser.add_argument("--tuning-max-samples", type=int)
+    parser.add_argument("--tuning-cv-splits", type=int)
+    parser.add_argument(
+        "--disable-random-search",
+        action="store_true",
+        help="Skip random search and use the default model hyperparameters.",
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = resolve_args(parse_args())
+def main(force_random_search: bool | None = False) -> None:
+    args = resolve_args(parse_args(), force_random_search=force_random_search)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.report_dir.mkdir(parents=True, exist_ok=True)
     (args.report_dir / "figures").mkdir(parents=True, exist_ok=True)
 
-    # Giải quyết điểm nghẽn 1: Phân nhánh xử lý dữ liệu động dựa trên loại Genotype
     if args.genotype_type == "snp":
         X, y = load_snp_data(str(args.data_path), args.target_column)
         feature_columns = list(X.columns)
     else:
-        # Sử dụng loader chuyên dụng mới cho dữ liệu STR
         X, y = load_str_data(str(args.data_path), args.target_column)
         from .data import find_allele_pairs
+
         feature_columns = find_allele_pairs(X.columns)
 
-    # Tự động kích hoạt Feature Selection nếu là dữ liệu SNP để tránh overfitting
-    use_fs = True if args.genotype_type == "snp" else False
+    use_fs = args.genotype_type == "snp"
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
@@ -91,68 +103,91 @@ def main() -> None:
     if args.model_name:
         models = {args.model_name: models[args.model_name]}
 
-    cv_results = evaluate_candidates(
-        X_train,
-        y_train,
-        models,
-        feature_columns,
-        args.genotype_type,
-        args.cv_splits,
-        args.random_state,
-        use_feature_selection=use_fs,  # Truyền flag điều khiển
-    )
+    tuning_rows: list[dict[str, object]] = []
+    best_pipeline = None
+    best_model_name = None
+    best_model_params = None
+    tuning_sample_size = len(X_train)
 
-    # Đánh giá tất cả mô hình trên tập Holdout Test để so sánh trực tiếp
-    holdout_scores = []
-    for model_name, estimator in models.items():
-        pipeline = build_pipeline(
-            estimator,
+    if args.use_random_search:
+        X_tune, y_tune = build_tuning_subset(
+            X_train,
+            y_train,
+            sample_fraction=args.tuning_sample_fraction,
+            max_samples=args.tuning_max_samples,
+            random_state=args.random_state,
+            cv_splits=args.tuning_cv_splits,
+        )
+        tuning_sample_size = len(X_tune)
+        tuning_results, best_model_name, best_pipeline, best_model_params, tuned_pipelines = tune_models(
+            X_tune=X_tune,
+            y_tune=y_tune,
+            models=models,
+            feature_columns=feature_columns,
+            genotype_type=args.genotype_type,
+            use_feature_selection=use_fs,
+            random_state=args.random_state,
+            n_iter=args.random_search_iters,
+            cv_splits=args.tuning_cv_splits,
+        )
+        tuning_rows.extend(tuning_results)
+        models_to_evaluate = tuned_pipelines
+    else:
+        cv_results = evaluate_candidates(
+            X_train=X_train,
+            y_train=y_train,
+            models=models,
+            feature_columns=feature_columns,
+            genotype_type=args.genotype_type,
+            cv_splits=args.cv_splits,
+            random_state=args.random_state,
+            use_feature_selection=use_fs,
+        )
+        tuning_rows.extend(cv_results.to_dict(orient="records"))
+        best_model_name = str(cv_results.iloc[0]["model"])
+        best_model_params = {}
+        best_pipeline = build_pipeline(
+            models[best_model_name],
             feature_columns,
             genotype_type=args.genotype_type,
             use_feature_selection=use_fs,
         )
-        pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
-        
-        holdout_scores.append({
-            "model": model_name,
-            "holdout_accuracy": float(accuracy_score(y_test, y_pred)),
-            "holdout_balanced_accuracy": float(balanced_accuracy_score(y_test, y_pred)),
-            "holdout_f1_macro": float(f1_score(y_test, y_pred, average="macro"))
-        })
-    
-    holdout_df = pd.DataFrame(holdout_scores)
-    cv_results = cv_results.merge(holdout_df, on="model")
-    cv_results.to_csv(args.report_dir / "cv_results.csv", index=False)
+        models_to_evaluate = models
 
-    best_model_name = cv_results.iloc[0]["model"]
-    
-    # Tạo pipeline tối ưu nhất cho mô hình thắng cuộc
-    best_pipeline = build_pipeline(
-        models[best_model_name],
-        feature_columns,
+    if best_pipeline is None or best_model_name is None:
+        raise RuntimeError("No model pipeline was selected for final training.")
+
+    holdout_scores = evaluate_models_on_holdout(
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        y_test=y_test,
+        models=models_to_evaluate,
+        feature_columns=feature_columns,
         genotype_type=args.genotype_type,
         use_feature_selection=use_fs,
     )
-    best_pipeline.fit(X_train, y_train)
+
+    final_pipeline = clone(best_pipeline)
+    final_pipeline.fit(X_train, y_train)
 
     labels = sorted(y.unique())
-    
-    # Lấy thông tin index (SAMPLE ID) thay vì bóc tách metadata_columns thủ công phức tạp
-    id_cols = [] 
+    metrics, predictions = evaluate_holdout(final_pipeline, X_test, y_test, labels, [])
 
-    metrics, predictions = evaluate_holdout(
-        best_pipeline, X_test, y_test, labels, id_cols
+    model_path = args.output_dir / f"ancestry_{args.genotype_type}_model.joblib"
+    joblib.dump(final_pipeline, model_path)
+
+    tuning_df = pd.DataFrame(tuning_rows).sort_values(
+        "tuning_balanced_accuracy_mean",
+        ascending=False,
+        na_position="last",
     )
+    holdout_df = pd.DataFrame(holdout_scores)
+    tuning_df = tuning_df.merge(holdout_df, on="model", how="left")
+    tuning_df.to_csv(args.report_dir / "cv_results.csv", index=False)
+    tuning_df.to_csv(args.report_dir / "tuning_results.csv", index=False)
 
-    model_path = (
-        args.output_dir / f"ancestry_{args.genotype_type}_model.joblib"
-    )
-    joblib.dump(best_pipeline, model_path)
-
-    predictions.to_csv(
-        args.report_dir / "holdout_predictions.csv", index=True
-    )  # index=True giúp giữ lại SAMPLE ID ở cột đầu
+    predictions.to_csv(args.report_dir / "holdout_predictions.csv", index=True)
     save_json(metrics, args.report_dir / "metrics.json")
     save_json(
         {
@@ -162,6 +197,13 @@ def main() -> None:
             "target_column": args.target_column,
             "model_path": str(model_path),
             "best_model": best_model_name,
+            "best_params": best_model_params,
+            "random_search_enabled": args.use_random_search,
+            "random_search_iterations": args.random_search_iters,
+            "tuning_sample_fraction": args.tuning_sample_fraction,
+            "tuning_max_samples": args.tuning_max_samples,
+            "tuning_cv_splits": args.tuning_cv_splits,
+            "tuning_sample_size": tuning_sample_size,
             "n_samples": int(len(X)),
             "n_train": int(len(X_train)),
             "n_test": int(len(X_test)),
@@ -176,13 +218,20 @@ def main() -> None:
         args.report_dir / "figures" / "confusion_matrix.png",
     )
 
-    print(f"Best model: {best_model_name}")
+    if args.use_random_search:
+        print(f"Best tuned model: {best_model_name}")
+    else:
+        print(f"Best CV model: {best_model_name}")
+    print(f"Best params: {json.dumps(best_model_params, ensure_ascii=True)}")
     print(f"Holdout accuracy: {metrics['accuracy']:.4f}")
     print(f"Holdout balanced accuracy: {metrics['balanced_accuracy']:.4f}")
     print(f"Artifacts saved to: {args.output_dir} and {args.report_dir}")
 
 
-def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
+def resolve_args(
+    args: argparse.Namespace,
+    force_random_search: bool | None = False,
+) -> argparse.Namespace:
     config: dict[str, object] = {}
     if args.config:
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -217,14 +266,166 @@ def resolve_args(args: argparse.Namespace) -> argparse.Namespace:
         if args.random_state is not None
         else int(config.get("random_state", RANDOM_STATE))
     )
+    args.random_search_iters = (
+        args.random_search_iters
+        if args.random_search_iters is not None
+        else int(config.get("random_search_iters", 12))
+    )
+    args.tuning_sample_fraction = (
+        args.tuning_sample_fraction
+        if args.tuning_sample_fraction is not None
+        else float(config.get("tuning_sample_fraction", 0.6))
+    )
+    args.tuning_max_samples = (
+        args.tuning_max_samples
+        if args.tuning_max_samples is not None
+        else int(config.get("tuning_max_samples", 0)) or None
+    )
+    args.tuning_cv_splits = (
+        args.tuning_cv_splits
+        if args.tuning_cv_splits is not None
+        else int(config.get("tuning_cv_splits", 3))
+    )
+    args.use_random_search = not args.disable_random_search
+    if "use_random_search" in config and not args.disable_random_search:
+        args.use_random_search = bool(config.get("use_random_search", True))
+    if force_random_search is not None:
+        args.use_random_search = force_random_search
     return args
+
+
+def build_tuning_subset(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    sample_fraction: float,
+    max_samples: int | None,
+    random_state: int,
+    cv_splits: int,
+) -> tuple[pd.DataFrame, pd.Series]:
+    requested_size = int(len(X_train) * sample_fraction)
+    if max_samples is not None:
+        requested_size = min(requested_size, max_samples)
+
+    if requested_size <= 0 or requested_size >= len(X_train):
+        return X_train, y_train
+
+    min_class_count = int(y_train.value_counts().min())
+    if min_class_count < cv_splits:
+        return X_train, y_train
+
+    min_size_for_classes = cv_splits * int(y_train.nunique())
+    requested_size = max(requested_size, min_size_for_classes)
+    if requested_size >= len(X_train):
+        return X_train, y_train
+
+    try:
+        X_tune, _, y_tune, _ = train_test_split(
+            X_train,
+            y_train,
+            train_size=requested_size,
+            random_state=random_state,
+            stratify=y_train,
+        )
+    except ValueError:
+        return X_train, y_train
+
+    if int(y_tune.value_counts().min()) < cv_splits:
+        return X_train, y_train
+
+    return X_tune, y_tune
+
+
+def tune_models(
+    X_tune: pd.DataFrame,
+    y_tune: pd.Series,
+    models: dict[str, object],
+    feature_columns: list[tuple[str, str]] | list[str],
+    genotype_type: str,
+    use_feature_selection: bool,
+    random_state: int,
+    n_iter: int,
+    cv_splits: int,
+) -> tuple[list[dict[str, object]], str, object, dict[str, object]]:
+    max_pca_components = None
+    if genotype_type == "snp":
+        fold_train_size = len(X_tune) - int(np.ceil(len(X_tune) / cv_splits))
+        max_pca_components = max(
+            1,
+            min(X_tune.shape[1], fold_train_size),
+        )
+
+    search_spaces = random_search_spaces(
+        genotype_type=genotype_type,
+        random_state=random_state,
+        max_pca_components=max_pca_components,
+    )
+    cv = StratifiedKFold(
+        n_splits=cv_splits,
+        shuffle=True,
+        random_state=random_state,
+    )
+
+    rows: list[dict[str, object]] = []
+    best_model_name = ""
+    best_pipeline = None
+    best_params: dict[str, object] = {}
+    best_score = -np.inf
+    tuned_pipelines: dict[str, object] = {}
+
+    for model_name, estimator in models.items():
+        pipeline = build_pipeline(
+            estimator,
+            feature_columns,
+            genotype_type=genotype_type,
+            use_feature_selection=use_feature_selection,
+        )
+        search = RandomizedSearchCV(
+            estimator=pipeline,
+            param_distributions=search_spaces[model_name],
+            n_iter=n_iter,
+            scoring="balanced_accuracy",
+            n_jobs=-1,
+            cv=cv,
+            refit=True,
+            random_state=random_state,
+            return_train_score=True,
+            error_score="raise",
+        )
+        search.fit(X_tune, y_tune)
+
+        for i, params in enumerate(search.cv_results_["params"]):
+            config_name = f"{model_name}_config_{i}"
+            row = {
+                "model": config_name,
+                "tuning_balanced_accuracy_mean": float(search.cv_results_["mean_test_score"][i]),
+                "tuning_balanced_accuracy_std": float(search.cv_results_["std_test_score"][i]),
+                "tuning_train_balanced_accuracy_mean": float(search.cv_results_["mean_train_score"][i]),
+                "best_params": json.dumps(params, ensure_ascii=True),
+                "random_search_iterations": int(n_iter),
+                "tuning_samples": int(len(X_tune)),
+            }
+            rows.append(row)
+            
+            cloned_pipeline = clone(pipeline).set_params(**params)
+            tuned_pipelines[config_name] = cloned_pipeline
+
+        if search.best_score_ > best_score:
+            best_score = float(search.best_score_)
+            best_model_name = f"{model_name}_config_{search.best_index_}"
+            best_pipeline = search.best_estimator_
+            best_params = search.best_params_
+
+    if best_pipeline is None:
+        raise RuntimeError("Random search did not produce a best estimator.")
+
+    return rows, best_model_name, best_pipeline, best_params, tuned_pipelines
 
 
 def evaluate_candidates(
     X_train: pd.DataFrame,
     y_train: pd.Series,
     models: dict[str, object],
-    feature_columns: list[str],
+    feature_columns: list[tuple[str, str]] | list[str],
     genotype_type: str,
     cv_splits: int,
     random_state: int,
@@ -236,12 +437,13 @@ def evaluate_candidates(
         "f1_macro": "f1_macro",
     }
     cv = StratifiedKFold(
-        n_splits=cv_splits, shuffle=True, random_state=random_state
+        n_splits=cv_splits,
+        shuffle=True,
+        random_state=random_state,
     )
 
     rows: list[dict[str, float | str]] = []
     for model_name, estimator in models.items():
-        # Gọi build_pipeline phiên bản mới nhận tham số lọc tính năng
         pipeline = build_pipeline(
             estimator,
             feature_columns,
@@ -254,15 +456,23 @@ def evaluate_candidates(
             y_train,
             cv=cv,
             scoring=scorer,
-            n_jobs=-1,  # Đẩy lên tối đa nhân CPU xử lý song song các fold tăng tốc độ tính toán
-            return_train_score=False,
+            n_jobs=-1,
+            return_train_score=True,
         )
-        row: dict[str, float | str] = {"model": model_name}
+        row: dict[str, float | str] = {
+            "model": model_name,
+            "best_params": "{}",
+            "random_search_iterations": 0,
+            "tuning_samples": int(len(X_train)),
+        }
         for metric in scorer:
-            # Validation scores (test fold)
-            val_values = scores[f"test_{metric}"]
-            row[f"{metric}_mean"] = float(np.mean(val_values))
-            row[f"{metric}_std"] = float(np.std(val_values))
+            row[f"{metric}_mean"] = float(np.mean(scores[f"test_{metric}"]))
+            row[f"{metric}_std"] = float(np.std(scores[f"test_{metric}"]))
+            row[f"train_{metric}_mean"] = float(np.mean(scores[f"train_{metric}"]))
+            row[f"train_{metric}_std"] = float(np.std(scores[f"train_{metric}"]))
+        row["tuning_balanced_accuracy_mean"] = row["balanced_accuracy_mean"]
+        row["tuning_balanced_accuracy_std"] = row["balanced_accuracy_std"]
+        row["tuning_train_balanced_accuracy_mean"] = row["train_balanced_accuracy_mean"]
         rows.append(row)
 
     return (
@@ -270,6 +480,44 @@ def evaluate_candidates(
         .sort_values("balanced_accuracy_mean", ascending=False)
         .reset_index(drop=True)
     )
+
+
+def evaluate_models_on_holdout(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    models: dict[str, object],
+    feature_columns: list[tuple[str, str]] | list[str],
+    genotype_type: str,
+    use_feature_selection: bool = False,
+) -> list[dict[str, float | str]]:
+    rows: list[dict[str, float | str]] = []
+    for model_name, estimator in models.items():
+        if hasattr(estimator, "steps"):
+            pipeline = clone(estimator)
+        else:
+            pipeline = build_pipeline(
+                estimator,
+                feature_columns,
+                genotype_type=genotype_type,
+                use_feature_selection=use_feature_selection,
+            )
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        rows.append(
+            {
+                "model": model_name,
+                "holdout_accuracy": float(accuracy_score(y_test, y_pred)),
+                "holdout_balanced_accuracy": float(
+                    balanced_accuracy_score(y_test, y_pred)
+                ),
+                "holdout_f1_macro": float(
+                    f1_score(y_test, y_pred, average="macro")
+                ),
+            }
+        )
+    return rows
 
 
 def evaluate_holdout(
